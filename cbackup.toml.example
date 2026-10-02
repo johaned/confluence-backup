@@ -21,6 +21,8 @@ index_dir      = "out/index"
 bundle_dir     = "out/bundle"
 assets_subdir  = "assets"
 index_filename = "{root}_{timestamp}.csv"
+# View counts change daily; embedding them rewrites every page each run.
+include_usage  = false
 
 [analytics]
 enabled      = true

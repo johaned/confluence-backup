@@ -23,6 +23,7 @@ DEFAULTS: dict[str, Any] = {
         "bundle_dir": "out/bundle",
         "assets_subdir": "assets",
         "index_filename": "{root}_{timestamp}.csv",
+        "include_usage": False,
     },
     "analytics": {"enabled": True, "windows_days": [30, 90]},
     "http": {

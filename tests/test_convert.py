@@ -227,3 +227,111 @@ def test_table_inside_a_panel_is_still_emitted() -> None:
             "</ac:rich-text-body></ac:structured-macro>")
     out, f = to_markdown(body)
     assert emitted_tables(out, f) == inventory(body).table_count == 1
+
+
+def test_code_block_inside_a_list_item_is_indented_not_inlined() -> None:
+    """Regression: macros inside <li> were inlined onto the bullet, producing
+    unrenderable Markdown and hiding the code from any line-anchored counter."""
+    out = md(f"<ol><li>Run this:{code_macro('bash', 'make build')}</li><li>Then</li></ol>")
+    lines = out.splitlines()
+    assert lines[0] == "1. Run this:"
+    assert lines[1] == "  ```bash"
+    assert lines[2] == "  make build"
+    assert lines[3] == "  ```"
+    assert lines[4] == "2. Then"
+
+
+def test_table_inside_a_list_item_is_indented() -> None:
+    out = md("<ul><li>see<table><tbody><tr><td>a</td><td>b</td></tr></tbody></table></li></ul>")
+    assert "- see" in out
+    assert any(l.startswith("  |") for l in out.splitlines())
+
+
+def test_nested_list_with_code_keeps_both() -> None:
+    out = md(f"<ul><li>outer<ul><li>inner{code_macro('sh', 'x')}</li></ul></li></ul>")
+    assert "- outer" in out and "  - inner" in out and "    ```sh" in out
+
+
+def test_list_item_code_counts_as_a_code_block() -> None:
+    from cbackup.gate import count_markdown, count_source
+
+    body = f"<ol><li>step{code_macro('sh', 'x')}</li></ol>"
+    assert count_markdown(md(body))["code_blocks"] == count_source(body)["code_blocks"] == 1
+
+
+# -- user mentions ---------------------------------------------------------
+MENTION = '<p>cc <ac:link><ri:user ri:account-id="abc123" /></ac:link></p>'
+
+
+def test_mention_becomes_a_resolvable_link() -> None:
+    """A mention carries no visible text; dropping the element loses the
+    reference entirely, so it stays a link to the profile."""
+    out = md(MENTION, options={"base_url": "https://site/wiki"},
+             user_resolver=lambda a: "Ada Lovelace")
+    assert "[@Ada Lovelace](https://site/wiki/people/abc123)" in out
+
+
+def test_mention_without_a_resolver_keeps_the_account_id() -> None:
+    assert "@abc123" in md(MENTION)
+
+
+def test_mention_counts_as_a_link_for_the_gate() -> None:
+    from cbackup.gate import count_markdown, count_source
+
+    out = md(MENTION, options={"base_url": "https://site/wiki"}, user_resolver=lambda a: "A")
+    assert count_markdown(out)["links"] == count_source(MENTION)["links"] == 1
+
+
+def test_html_table_links_are_counted_by_the_gate() -> None:
+    """Links inside passthrough tables are <a href>, not Markdown syntax."""
+    from cbackup.gate import count_markdown
+
+    body = '<table><tbody><tr><td colspan="2"><a href="https://x">l</a></td></tr></tbody></table>'
+    assert count_markdown(md(body))["links"] == 1
+
+
+# -- syntax hazards in page content ----------------------------------------
+def test_brackets_in_image_alt_are_escaped() -> None:
+    """`![[x] y](p)` reads as an Obsidian embed, not an image."""
+    out = md('<ac:image><ri:attachment ri:filename="[RESTORED] Core.png" /></ac:image>',
+             resolver=lambda n: "assets/ab.png")
+    assert out.startswith("![\\[RESTORED\\] Core.png](assets/ab.png)")
+    assert not out.startswith("![[")
+
+
+def test_brackets_in_link_label_are_escaped() -> None:
+    out = md('<p><a href="https://x">see [docs]</a></p>')
+    assert "[see \\[docs\\]](https://x)" in out
+
+
+def test_anchor_without_href_is_plain_text() -> None:
+    """Legacy markup: <a> with no target is not a link, and `[x]()` is broken."""
+    out = md("<p><a>label</a> tail</p>")
+    assert out.strip() == "label tail"
+    assert "](" not in out
+
+
+def test_literal_bracket_paren_in_prose_cannot_form_a_link() -> None:
+    assert md("<p>smses[](new)</p>").strip() == "smses[]\\(new)"
+
+
+def test_code_spans_are_not_escaped() -> None:
+    assert md("<p><code>arr[](x)</code></p>").strip() == "`arr[](x)`"
+
+
+def test_macro_parameter_links_are_not_content() -> None:
+    """A link inside ac:parameter configures a macro; counting it as content
+    made the gate report phantom losses."""
+    from cbackup.gate import count_source
+
+    body = ('<ac:structured-macro ac:name="excerpt-include">'
+            '<ac:parameter ac:name="page"><ac:link>'
+            '<ri:page ri:content-title="@self" /></ac:link></ac:parameter>'
+            "</ac:structured-macro>")
+    assert count_source(body)["links"] == 0
+
+
+def test_hrefless_anchor_is_not_counted_as_a_source_link() -> None:
+    from cbackup.gate import count_source
+
+    assert count_source('<p><a>x</a><a href="https://y">y</a></p>')["links"] == 1

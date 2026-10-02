@@ -48,9 +48,23 @@ def _esc(text: str) -> str:
     return text.replace("|", "\\|")
 
 
+def _label(text: str) -> str:
+    """Brackets in a link label or image alt break the syntax -- `![[x] y](p)`
+    is read as an Obsidian embed, not an image."""
+    return text.replace("[", "\\[").replace("]", "\\]").strip()
+
+
+def _prose(text: str) -> str:
+    """Literal `](` in page text would form an accidental link."""
+    return text.replace("](", "]\\(")
+
+
 class Converter:
-    def __init__(self, options: dict | None = None, resolver: Resolver | None = None) -> None:
+    def __init__(self, options: dict | None = None, resolver: Resolver | None = None,
+                 user_resolver: Callable[[str], str] | None = None) -> None:
         options = options or {}
+        self.base_url = (options.get("base_url") or "").rstrip("/")
+        self.user_resolver = user_resolver
         self.complex_table_mode = options.get("complex_table_mode", "html")
         self.unknown_macro = options.get("unknown_macro", "flag")
         self.flavor = options.get("flavor", "obsidian")
@@ -106,14 +120,28 @@ class Converter:
         return self._inline(el).strip()
 
     def _list(self, el: etree._Element, ordered: bool, depth: int = 0) -> str:
+        """Block content inside <li> -- code macros, tables -- is emitted as an
+        indented block beneath the bullet. Inlining it onto the bullet line
+        produces unrenderable Markdown and hides the content."""
+        block_tags = {"ul", "ol", "table", "pre", "blockquote",
+                      f"{{{AC}}}structured-macro"}
         lines: list[str] = []
+        pad = "  " * depth
         for index, item in enumerate(el.findall("li"), start=1):
             marker = f"{index}." if ordered else "-"
-            nested = [c for c in item if c.tag in ("ul", "ol")]
-            text = self._inline(item, skip={"ul", "ol"}).strip()
-            lines.append("  " * depth + f"{marker} {text}")
-            for sub in nested:
-                lines.append(self._list(sub, sub.tag == "ol", depth + 1))
+            text = self._inline(item, skip=block_tags).strip()
+            lines.append(f"{pad}{marker} {text}".rstrip())
+            indent = pad + "  "
+            for child in item:
+                tag = child.tag if isinstance(child.tag, str) else ""
+                if tag in ("ul", "ol"):
+                    lines.append(self._list(child, tag == "ol", depth + 1))
+                elif tag in block_tags:
+                    rendered = self._block(child)
+                    if rendered.strip():
+                        lines.append("\n".join(
+                            (indent + line) if line.strip() else ""
+                            for line in rendered.splitlines()))
         return "\n".join(lines)
 
     # -- tables ----------------------------------------------------------
@@ -268,7 +296,7 @@ class Converter:
 
     def _image(self, el: etree._Element) -> str:
         filename = self._filename(el)
-        alt = el.get(f"{{{AC}}}alt") or filename or "image"
+        alt = _label(el.get(f"{{{AC}}}alt") or filename or "image")
         if not filename:  # external image
             url = el.find(f".//{{{RI}}}url")
             return f"![{alt}]({url.get(f'{{{RI}}}value')})" if url is not None else ""
@@ -279,21 +307,23 @@ class Converter:
         return f"![{alt}]({target})"
 
     # -- inline ----------------------------------------------------------
-    def _inline(self, el: etree._Element, skip: set[str] | None = None) -> str:
+    def _inline(self, el: etree._Element, skip: set[str] | None = None,
+                raw: bool = False) -> str:
         skip = skip or set()
-        parts: list[str] = [el.text or ""]
+        esc = (lambda t: t) if raw else _prose
+        parts: list[str] = [esc(el.text or "")]
         for child in el:
             tag = child.tag if isinstance(child.tag, str) else ""
             if tag in skip:
-                parts.append(child.tail or "")
+                parts.append(esc(child.tail or ""))
                 continue
             parts.append(self._inline_el(child))
-            parts.append(child.tail or "")
+            parts.append(esc(child.tail or ""))
         return "".join(parts)
 
     def _inline_el(self, el: etree._Element) -> str:
         tag = el.tag if isinstance(el.tag, str) else ""
-        inner = self._inline(el)
+        inner = self._inline(el, raw=tag in ("code", "pre"))
         if tag in ("strong", "b"):
             return f"**{inner.strip()}**"
         if tag in ("em", "i"):
@@ -305,12 +335,24 @@ class Converter:
         if tag == "br":
             return "  \n"
         if tag == "a":
-            return f"[{inner.strip()}]({el.get('href', '')})"
+            href = el.get("href", "").strip()
+            if not href:  # legacy markup: an anchor with no target is just text
+                return inner
+            return f"[{_label(inner)}]({href})"
         if tag == f"{{{AC}}}image":
             return self._image(el)
         if tag == f"{{{AC}}}structured-macro":
             return self._macro(el)
         if tag == f"{{{AC}}}link":
+            user = el.find(f"{{{RI}}}user")
+            if user is not None:
+                # A mention carries no visible text; dropping the element would
+                # lose the reference entirely, so keep it as a resolvable link.
+                account = user.get(f"{{{RI}}}account-id") or user.get(f"{{{RI}}}userkey") or ""
+                name = self.user_resolver(account) if self.user_resolver else ""
+                label = f"@{name or account or 'user'}"
+                target = f"{self.base_url}/people/{account}" if (self.base_url and account) else ""
+                return f"[{label}]({target})" if target else f"`{label}`"
             body = el.find(f"{{{AC}}}link-body" if el.find(f"{{{AC}}}link-body") is not None else ".")
             page = el.find(f"{{{RI}}}page")
             label = ("".join(body.itertext()).strip() if body is not None else "") or (
@@ -324,6 +366,7 @@ class Converter:
 
 
 def to_markdown(xhtml: str, options: dict | None = None,
-                resolver: Resolver | None = None) -> tuple[str, Flags]:
-    converter = Converter(options, resolver)
+                resolver: Resolver | None = None,
+                user_resolver: Callable[[str], str] | None = None) -> tuple[str, Flags]:
+    converter = Converter(options, resolver, user_resolver)
     return converter.convert(xhtml), converter.flags

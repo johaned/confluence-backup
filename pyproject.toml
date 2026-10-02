@@ -9,7 +9,7 @@ dependencies = ["httpx>=0.27", "lxml>=5.2"]
 cbackup = "cbackup.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pyyaml>=6.0"]  # pyyaml validates our hand-rolled frontmatter
 
 [build-system]
 requires = ["hatchling"]
