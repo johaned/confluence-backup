@@ -31,6 +31,7 @@ WIKILINK = re.compile(r"\[\[[^\]]+\]\]")
 HTML_TABLE = re.compile(r"<table[\s>]")
 HTML_CODE = re.compile(r"<pre><code")
 HTML_LINK = re.compile(r"<a [^>]*href=")
+HTML_HEADING = re.compile(r"<h[1-6][ >]")
 LEAK = re.compile(r"ac:(structured-macro|plain-text-body|rich-text-body)|ri:attachment")
 
 
@@ -52,8 +53,11 @@ def count_markdown(text: str) -> dict[str, int]:
     without_images = IMAGE.sub("", body)
     return {
         "tables": len(SEPARATOR.findall(body)) + len(HTML_TABLE.findall(body)),
+        # A merged-cell table flattened to pipes keeps its count but loses its
+        # structure, so the passthrough form is counted separately.
+        "complex_tables": len(HTML_TABLE.findall(body)),
         "code_blocks": len(FENCE.findall(body)) // 2 + len(HTML_CODE.findall(body)),
-        "headings": len(HEADING.findall(body)),
+        "headings": len(HEADING.findall(body)) + len(HTML_HEADING.findall(body)),
         "images": len(IMAGE.findall(body)),
         "links": (len(LINK.findall(without_images)) + len(WIKILINK.findall(body))
                   + len(HTML_LINK.findall(body))),
@@ -73,6 +77,7 @@ def count_source(xhtml: str) -> dict[str, int]:
             links += 1
     return {
         "tables": inv.table_count,
+        "complex_tables": inv.complex_table_count,
         "code_blocks": inv.code_block_count,
         "headings": inv.heading_count,
         "images": inv.image_count,
@@ -84,7 +89,7 @@ class Gate:
     """Checks are deliberately asymmetric: losing content is a failure, gaining
     it (a wiki link rendered two ways) is not."""
 
-    STRICT = ("tables", "code_blocks")
+    STRICT = ("tables", "code_blocks", "complex_tables")
     LOSSY_OK = ("headings", "images", "links")
 
     def __init__(self, client: ConfluenceClient, config: Config) -> None:
@@ -98,7 +103,7 @@ class Gate:
             if path.name == "index.md":
                 continue
             text = path.read_text(encoding="utf-8")
-            pid = re.search(r'^\s*page_id:\s*"?(\d+)"?', text, re.M)
+            pid = re.search(r'^\s*page_id:\s*"?([A-Za-z0-9_.:-]+)"?', text, re.M)
             title = re.search(r'^title:\s*"(.*)"$', text, re.M)
             if pid:
                 found.append((pid.group(1), path, title.group(1) if title else path.stem))

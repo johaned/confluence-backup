@@ -94,3 +94,22 @@ def test_no_site_specific_literals_in_source() -> None:
                 line = text[: match.start()].count("\n") + 1
                 offenders.append(f"{path.name}:{line} {label}: {match.group(0)}")
     assert not offenders, "site-specific literals must live in config:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("https://x.atlassian.net/wiki/spaces/SE/pages/4110811138/T", "4110811138"),
+        ("https://x.atlassian.net/wiki/spaces/SE/folder/386809/Docs", "386809"),
+        ("page:123", "123"),
+        ("4110811138", "4110811138"),
+    ],
+)
+def test_filters_accept_the_same_forms_as_root(value: str, expected: str) -> None:
+    """'exclude pages by link' means a pasted URL must work, not just an id."""
+    assert cfg.normalize_ids([value]) == {expected}
+
+
+def test_normalize_ids_tolerates_junk() -> None:
+    assert cfg.normalize_ids(["", "  ", "not-a-url"]) == {"not-a-url"}
+    assert cfg.normalize_ids(None) == set()

@@ -105,6 +105,6 @@ def inventory(xhtml: str) -> Inventory:
         image_count=len(root.findall(".//ac:image", NS)),
         link_count=len(root.findall(".//a")) + len(root.findall(".//ac:link", NS)),
         code_block_count=sum(1 for n in (macro_name(m) for m in macros) if n == "code"),
-        heading_count=sum(len(root.findall(f".//{h}")) for h in ("h1", "h2", "h3", "h4")),
+        heading_count=sum(len(root.findall(f".//{h}")) for h in ("h1", "h2", "h3", "h4", "h5", "h6")),
         body_chars=len(xhtml or ""),
     )

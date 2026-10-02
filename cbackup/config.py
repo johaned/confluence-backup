@@ -42,7 +42,9 @@ DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "select": "none",
         "min_views_30d": 5,
-        "model": "claude-haiku-4-5-20251001",
+        "model": "claude-haiku-4-5",
+        "max_pages": 10,
+        "max_chars": 6000,
         "fields": ["description", "tags"],
     },
 }
@@ -60,8 +62,10 @@ class Root:
         return f"{self.kind}-{self.value}"
 
 
-_URL_FOLDER = re.compile(r"/wiki/spaces/([^/]+)/folder/(\d+)")
-_URL_PAGE = re.compile(r"/wiki/spaces/([^/]+)/pages/(\d+)")
+# The segment after /folder/ or /pages/ is always the content id; do not
+# assume it is numeric.
+_URL_FOLDER = re.compile(r"/wiki/spaces/([^/]+)/folder/([^/?#]+)")
+_URL_PAGE = re.compile(r"/wiki/spaces/([^/]+)/pages/([^/?#]+)")
 _URL_SPACE = re.compile(r"/wiki/spaces/([^/?#]+)")
 
 
@@ -91,6 +95,21 @@ def parse_root(raw: str) -> Root:
     if s.isdigit():
         return Root(AUTO, s)
     return Root(SPACE, s)
+
+
+def normalize_ids(values: list[str] | None) -> set[str]:
+    """Accept the same forms as --root (URL, page:123, bare id) for filters, so
+    a link pasted from the browser can be excluded as easily as targeted."""
+    out: set[str] = set()
+    for raw in values or []:
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            out.add(parse_root(text).value)
+        except ValueError:
+            out.add(text)
+    return out
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:

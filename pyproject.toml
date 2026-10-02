@@ -5,6 +5,10 @@ description = "Confluence Cloud -> OKF Markdown backup"
 requires-python = ">=3.12"
 dependencies = ["httpx>=0.27", "lxml>=5.2"]
 
+[project.optional-dependencies]
+# Only stage 4 (LLM enrichment) needs this; the pipeline runs without it.
+enrich = ["anthropic>=0.40"]
+
 [project.scripts]
 cbackup = "cbackup.cli:main"
 

@@ -7,7 +7,9 @@ like emitting. That property is what makes the backup diffable.
 
 from __future__ import annotations
 
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +17,7 @@ from typing import Any
 
 from .assets import AssetStore
 from .client import ConfluenceClient
-from .config import Config, Root
+from .config import Config, Root, normalize_ids
 from .convert import Converter
 from .okf import frontmatter, safe_filename
 from .tree import Node, Walker
@@ -48,6 +50,8 @@ class Exporter:
         self.analytics_on = bool(config.section("analytics").get("enabled", True))
         self.stats = ExportStats()
         self._spaces: dict[str, str] = {}
+        self.workers = max(1, int(config.section("http").get("concurrency", 1) or 1))
+        self._lock = threading.Lock()
 
     def _space_key(self, space_id: str | None) -> str:
         if not space_id:
@@ -74,22 +78,25 @@ class Exporter:
     def export_page(self, node: Node, generated_at: str) -> Path | None:
         page = self.client.get(f"/api/v2/pages/{node.id}", **{"body-format": "storage"})
         if not page.get("id"):
-            self.stats.failed.append(node.id)
+            with self._lock:
+                self.stats.failed.append(node.id)
             return None
         title = page.get("title", node.title)
         path = self._page_path(node, title)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        mapping = self.assets.fetch_for_page(node.id)
+        with self._lock:
+            mapping = self.assets.fetch_for_page(node.id)
         options = dict(self.markdown, base_url=self.client.base_url)
         converter = Converter(options, self.assets.resolver_for(mapping, path.parent),
                               user_resolver=self.client.display_name)
         body = converter.convert(page.get("body", {}).get("storage", {}).get("value", ""))
 
-        self.stats.html_tables += converter.flags.html_tables
-        self.stats.unknown_macros += converter.flags.unknown_macros
-        self.stats.generated_macros += converter.flags.generated_macros
-        self.stats.missing_assets += converter.flags.missing_assets
+        with self._lock:
+            self.stats.html_tables += converter.flags.html_tables
+            self.stats.unknown_macros += converter.flags.unknown_macros
+            self.stats.generated_macros += converter.flags.generated_macros
+            self.stats.missing_assets += converter.flags.missing_assets
 
         version = page.get("version", {}) or {}
         labels = sorted(l.get("name", "") for l in
@@ -112,7 +119,8 @@ class Exporter:
             views_window_days=self.windows[0] if (self.windows and self.include_usage) else None,
         )
         path.write_text(head + "\n" + body, encoding="utf-8")
-        self.stats.pages += 1
+        with self._lock:
+            self.stats.pages += 1
         return path
 
     def write_indexes(self, written: list[Path]) -> int:
@@ -125,7 +133,10 @@ class Exporter:
             entries = sorted(by_dir.get(directory, []), key=lambda p: p.name.lower())
             subdirs = sorted({d for d in directory.iterdir() if d.is_dir()}
                              if directory.exists() else [], key=lambda p: p.name.lower())
-            lines = [f"# {directory.name or 'Bundle'}", ""]
+            # The root heading must not depend on the output path, or the same
+            # content exported to a different directory would not compare equal.
+            title = "Bundle" if directory == self.bundle else directory.name
+            lines = [f"# {title}", ""]
             for sub in subdirs:
                 if sub.name == self.assets.subdir:
                     continue
@@ -152,15 +163,16 @@ class Exporter:
         walker = Walker(
             self.client,
             max_depth=int(filters.get("max_depth", 0) or 0),
-            exclude_ids={str(x) for x in filters.get("exclude", [])},
-            include_ids={str(x) for x in filters.get("include", [])},
+            exclude_ids=normalize_ids(filters.get("exclude")),
+            include_ids=normalize_ids(filters.get("include")),
         )
-        written: list[Path] = []
-        for root in roots:
-            for node in walker.walk(root):
-                path = self.export_page(node, generated_at)
-                if path:
-                    written.append(path)
+        nodes = [node for root in roots for node in walker.walk(root)]
+        if self.workers == 1:
+            paths = [self.export_page(n, generated_at) for n in nodes]
+        else:
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                paths = list(pool.map(lambda n: self.export_page(n, generated_at), nodes))
+        written = [p for p in paths if p]
         self.assets.save()
         self.write_indexes(written)
         self.stats.assets_downloaded = self.assets.downloaded

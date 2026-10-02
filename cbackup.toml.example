@@ -41,8 +41,12 @@ reserved_name_suffix = "-page"
 unknown_macro        = "flag"
 
 [enrich]
+# OFF by default. Sends page content to the Anthropic API and costs money.
+# Enabling it still requires confirming at the prompt (or passing --yes).
 enabled       = false
-select        = "none"
-min_views_30d = 5
-model         = "claude-haiku-4-5-20251001"
+select        = "none"          # all | none | from-index
+min_views_30d = 5               # used when select = "from-index"
+max_pages     = 10              # hard cap per run, a budget guard
+max_chars     = 6000            # per-page excerpt sent to the model
+model         = "claude-haiku-4-5"
 fields        = ["description", "tags"]

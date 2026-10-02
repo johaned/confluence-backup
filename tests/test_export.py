@@ -206,3 +206,28 @@ def test_gate_ignores_bare_word_link_targets() -> None:
     assert LINK.findall("<td>smses[](new)</td>") == ["new"]  # matched, but
     # ...the gate skips targets without a separator, since every asset path we
     # emit is relative and contains one.
+
+
+def test_concurrency_does_not_change_output(tmp_path: Path) -> None:
+    """Parallel fetching must stay byte-for-byte identical to serial, or the
+    backup is no longer diffable."""
+    serial = config(tmp_path, output={"bundle_dir": str(tmp_path / "s")}, http={"concurrency": 1})
+    parallel = config(tmp_path, output={"bundle_dir": str(tmp_path / "p")}, http={"concurrency": 8})
+    Exporter(simple_site(), serial).run([Root(FOLDER, "F1")])
+    Exporter(simple_site(), parallel).run([Root(FOLDER, "F1")])
+    assert fingerprint(tmp_path / "s") == fingerprint(tmp_path / "p")
+
+
+def test_bundle_content_does_not_depend_on_output_path(tmp_path: Path) -> None:
+    a = config(tmp_path, output={"bundle_dir": str(tmp_path / "alpha")})
+    b = config(tmp_path, output={"bundle_dir": str(tmp_path / "beta")})
+    Exporter(simple_site(), a).run([Root(FOLDER, "F1")])
+    Exporter(simple_site(), b).run([Root(FOLDER, "F1")])
+    assert fingerprint(tmp_path / "alpha") == fingerprint(tmp_path / "beta")
+
+
+def test_excluding_by_url_works(tmp_path: Path) -> None:
+    conf = config(tmp_path, filter={"exclude": ["https://site.invalid/wiki/spaces/SE/pages/P2/x"]})
+    stats = Exporter(simple_site(), conf).run([Root(FOLDER, "F1")])
+    assert stats.pages == 1
+    assert not (tmp_path / "bundle" / "Docs" / "Beta.md").exists()

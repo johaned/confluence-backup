@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import csv
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 from .client import ConfluenceClient
-from .config import Config, Root
+from .config import Config, Root, normalize_ids
 from .storage import inventory
 from .tree import Node, Walker
 
@@ -38,6 +40,8 @@ class Indexer:
     def __init__(self, client: ConfluenceClient, config: Config) -> None:
         self.client = client
         self.config = config
+        self.workers = max(1, int(config.section("http").get("concurrency", 1) or 1))
+        self._lock = threading.Lock()
         self.analytics = config.section("analytics")
         self.windows: list[int] = list(self.analytics.get("windows_days", []))
         self._spaces: dict[str, str] = {}
@@ -136,24 +140,32 @@ class Indexer:
         walker = Walker(
             self.client,
             max_depth=int(filters.get("max_depth", 0) or 0),
-            exclude_ids={str(x) for x in filters.get("exclude", [])},
-            include_ids={str(x) for x in filters.get("include", [])},
+            exclude_ids=normalize_ids(filters.get("exclude")),
+            include_ids=normalize_ids(filters.get("include")),
         )
         skip_labels = {l.lower() for l in filters.get("exclude_labels", [])}
 
+        nodes = [node for root in roots for node in walker.walk(root)]
         rows: list[dict[str, Any]] = []
         with state_file.open("a", encoding="utf-8") as checkpoint:
-            for root in roots:
-                for node in walker.walk(root):
-                    if node.id in done:
-                        rows.append(done[node.id])
-                        continue
-                    record = self.row(node, inspected_at)
-                    if skip_labels & {l.lower() for l in record["labels"].split("|") if l}:
-                        continue
-                    rows.append(record)
+            def handle(node: Node) -> dict[str, Any] | None:
+                if node.id in done:
+                    return done[node.id]
+                record = self.row(node, inspected_at)
+                if skip_labels & {l.lower() for l in record["labels"].split("|") if l}:
+                    return None
+                with self._lock:  # one writer; resume still costs minutes, not a rerun
                     checkpoint.write(json.dumps(record) + "\n")
-                    checkpoint.flush()  # resume after a 429 costs minutes, not a rerun
+                    checkpoint.flush()
+                return record
+
+            if self.workers == 1:
+                results = [handle(n) for n in nodes]
+            else:
+                with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                    # map preserves input order, so the CSV stays deterministic
+                    results = list(pool.map(handle, nodes))
+            rows = [r for r in results if r]
 
         index_dir = Path(out["index_dir"])
         index_dir.mkdir(parents=True, exist_ok=True)

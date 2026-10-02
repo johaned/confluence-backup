@@ -9,6 +9,7 @@ from typing import Any
 from . import config as cfg
 from .client import ConfluenceClient
 from .export import Exporter
+from .enrich import Enricher
 from .gate import Gate
 from .index import Indexer
 
@@ -32,6 +33,12 @@ def _overrides(args: argparse.Namespace) -> dict[str, Any]:
         out["http"]["concurrency"] = args.concurrency
     if args.no_analytics:
         out["analytics"]["enabled"] = False
+    if args.enrich:
+        out.setdefault("enrich", {})["enabled"] = True
+    if args.select:
+        out.setdefault("enrich", {})["select"] = args.select
+    if args.max_pages:
+        out.setdefault("enrich", {})["max_pages"] = args.max_pages
     if args.exclude:
         out["filter"]["exclude"] = args.exclude
     if args.include:
@@ -56,10 +63,58 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--flavor", choices=["obsidian", "gfm"])
     parser.add_argument("--complex-table-mode", choices=["html", "pipe-lossy"])
     parser.add_argument("--concurrency", type=int)
+    parser.add_argument("--enrich", action="store_true",
+                        help="enable LLM enrichment for this run (still prompts)")
+    parser.add_argument("--select", choices=["all", "none", "from-index"])
+    parser.add_argument("--page-ids", action="append", default=[])
+    parser.add_argument("--from-index", help="index CSV used by --select from-index")
+    parser.add_argument("--max-pages", type=int, help="cap pages sent to the model")
+    parser.add_argument("--yes", action="store_true",
+                        help="skip the enrichment confirmation (the notice still prints)")
     parser.add_argument("--no-analytics", action="store_true",
                         help="skip view counts (use where the endpoint is gated)")
-    parser.add_argument("command", choices=["index", "export", "gate"], help="pipeline stage to run")
+    parser.add_argument("command", choices=["index", "export", "gate", "enrich"], help="pipeline stage to run")
     return parser
+
+
+def _enrich(conf, args) -> int:
+    from pathlib import Path
+
+    out = conf.section("output")
+    enricher = Enricher(conf, Path(out["bundle_dir"]), Path(out["dir"]) / ".state")
+    if not enricher.enabled:
+        print("enrichment is disabled; enable [enrich] in config or pass --enrich",
+              file=sys.stderr)
+        return 2
+    index_csv = Path(args.from_index) if args.from_index else None
+    candidates = enricher.candidates(index_csv, args.page_ids or None)
+    if not candidates:
+        print("no pages selected (check [enrich].select, --page-ids or --from-index)")
+        return 0
+    print(enricher.describe_run(candidates))
+    if not (args.yes or enricher.confirm()):
+        print("  aborted; nothing was sent.")
+        return 1
+    try:
+        import anthropic
+    except ImportError:
+        print('enrichment needs the optional dependency: uv sync --extra enrich',
+              file=sys.stderr)
+        return 2
+    client = anthropic.Anthropic()
+    enricher.load_cache()
+    applied = 0
+    for candidate in candidates:
+        record = enricher.generate(client, candidate)
+        if record and enricher.apply(candidate, record):
+            applied += 1
+    enricher.save_cache()
+    stats = enricher.stats
+    print(f"  enriched {applied} pages "
+          f"({stats.generated} generated, {stats.cached} from cache)")
+    if stats.failed:
+        print(f"  failed: {stats.failed[:5]}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -110,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  FAIL {r.title[:46]}: {'; '.join(r.problems[:2])}")
             print(f"  {len(failed)} with problems")
             return 1 if failed else 0
+        elif args.command == "enrich":
+            return _enrich(conf, args)
     return 0
 
 
