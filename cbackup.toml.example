@@ -1,0 +1,46 @@
+# Copy to cbackup.toml and edit. Credentials are NEVER read from this file --
+# export CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL and CONFLUENCE_API_TOKEN instead.
+
+[site]
+base_url = "https://example.atlassian.net/wiki"
+
+[roots]
+spaces  = []
+folders = []
+pages   = []
+
+[filter]
+include        = []
+exclude        = []
+exclude_labels = []
+max_depth      = 0
+
+[output]
+dir            = "out"
+index_dir      = "out/index"
+bundle_dir     = "out/bundle"
+assets_subdir  = "assets"
+index_filename = "{root}_{timestamp}.csv"
+
+[analytics]
+enabled      = true
+windows_days = [30, 90]
+
+[http]
+concurrency         = 4
+timeout_seconds     = 30
+max_retries         = 4
+backoff_max_seconds = 30
+
+[markdown]
+flavor               = "obsidian"
+complex_table_mode   = "html"
+reserved_name_suffix = "-page"
+unknown_macro        = "flag"
+
+[enrich]
+enabled       = false
+select        = "none"
+min_views_30d = 5
+model         = "claude-haiku-4-5-20251001"
+fields        = ["description", "tags"]

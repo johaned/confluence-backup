@@ -1,0 +1,6 @@
+.venv/
+out/
+cbackup.toml
+__pycache__/
+*.pyc
+.pytest_cache/
