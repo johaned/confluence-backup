@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from lxml import etree
 
+from .links import MISSING, UNRESOLVED, mark, parse_page_url
 from .storage import AC, NS, RI, is_complex_table, macro_name, parse
 
 HEADINGS = {f"h{n}": "#" * n for n in range(1, 7)}
@@ -61,10 +62,12 @@ def _prose(text: str) -> str:
 
 class Converter:
     def __init__(self, options: dict | None = None, resolver: Resolver | None = None,
-                 user_resolver: Callable[[str], str] | None = None) -> None:
+                 user_resolver: Callable[[str], str] | None = None,
+                 links: Any = None) -> None:
         options = options or {}
         self.base_url = (options.get("base_url") or "").rstrip("/")
         self.user_resolver = user_resolver
+        self.links = links
         self.complex_table_mode = options.get("complex_table_mode", "html")
         self.unknown_macro = options.get("unknown_macro", "flag")
         self.flavor = options.get("flavor", "obsidian")
@@ -180,6 +183,16 @@ class Converter:
         if tag.startswith(f"{{{AC}}}") or tag.startswith(f"{{{RI}}}"):
             return self._html_children(el)  # unwrap unknown ac:/ri: wrappers
         inner = self._html_children(el)
+        if tag == "a" and self.links:
+            href = el.get("href", "").strip()
+            page_id = self.links.page_id_for(href) if href else None
+            if page_id:
+                local = self.links.href(page_id)
+                if local:
+                    return f'<a href="{_esc_html(local)}">{inner}</a>'
+                self.links.note("page-url", inner.strip()[:60], href)
+                return (f'<a href="{_esc_html(href)}">{inner}</a> '
+                        f"<strong>({self.links.state(page_id)})</strong>")
         if tag not in HTML_PASSTHROUGH:
             return inner
         attrs = "".join(
@@ -281,6 +294,35 @@ class Converter:
         body = self._body_text(el).strip()
         return f"<!-- confluence:unhandled-macro {name} -->" + (f"\n\n{body}" if body else "")
 
+    # -- page links ------------------------------------------------------
+    def _page_link(self, label: str, href: str) -> str:
+        """Localise a Confluence page URL when that page is in the bundle;
+        otherwise keep the URL and make its state visible."""
+        if not self.links:
+            return f"[{label}]({href})"
+        page_id = self.links.page_id_for(href)
+        if not page_id:
+            return f"[{label}]({href})"
+        local = self.links.href(page_id)
+        if local:
+            return f"[{label}]({local})"
+        reason = self.links.state(page_id)
+        self.links.note("page-url", label, href)
+        return mark(label, href, reason)
+
+    def _title_link(self, label: str, space: str, title: str) -> str:
+        """A title-based link carries no page id, so resolution is best effort."""
+        if self.links:
+            local = self.links.title(space, title)
+            if local:
+                return f"[{_label(label)}]({local})"
+            self.links.note("page-title", label, f"{space}:{title}" if space else title)
+        url = ""
+        if self.base_url and title:
+            key = space or ""
+            url = f"{self.base_url}/display/{key}/{title.replace(' ', '+')}" if key else ""
+        return mark(_label(label), url, UNRESOLVED)
+
     # -- assets & links --------------------------------------------------
     def _filename(self, el: etree._Element) -> str:
         node = el.find(f".//{{{RI}}}attachment")
@@ -338,7 +380,7 @@ class Converter:
             href = el.get("href", "").strip()
             if not href:  # legacy markup: an anchor with no target is just text
                 return inner
-            return f"[{_label(inner)}]({href})"
+            return self._page_link(_label(inner), href)
         if tag == f"{{{AC}}}image":
             return self._image(el)
         if tag == f"{{{AC}}}structured-macro":
@@ -358,7 +400,9 @@ class Converter:
             label = ("".join(body.itertext()).strip() if body is not None else "") or (
                 page.get(f"{{{RI}}}content-title") if page is not None else "link")
             if page is not None:
-                return f"[[{page.get(f'{{{RI}}}content-title')}|{label}]]"
+                title = page.get(f"{{{RI}}}content-title") or ""
+                space = page.get(f"{{{RI}}}space-key") or ""
+                return self._title_link(label or title, space, title)
             return label
         if tag in ("p", "div", "span", "li"):
             return inner

@@ -7,6 +7,9 @@ like emitting. That property is what makes the backup diffable.
 
 from __future__ import annotations
 
+import json
+import os
+import re
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -19,8 +22,19 @@ from .assets import AssetStore
 from .client import ConfluenceClient
 from .config import Config, Root, normalize_ids
 from .convert import Converter
+from .links import (MISSING, UNRESOLVED, UNVERIFIED, PageMap, is_tiny_url,
+                    parse_page_url)
 from .okf import frontmatter, safe_filename
 from .tree import Node, Walker
+
+
+def in_git_repo(path: Path) -> bool:
+    """Whether the bundle sits inside a working tree. Version control is a
+    recommendation, never a requirement: the export works either way."""
+    for candidate in [path, *path.resolve().parents]:
+        if (candidate / ".git").exists():
+            return True
+    return False
 
 
 @dataclass
@@ -33,6 +47,9 @@ class ExportStats:
     generated_macros: list[str] = field(default_factory=list)
     missing_assets: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    localised_links: int = 0
+    unresolved_links: int = 0
+    stranded_assets: int = 0
 
 
 class Exporter:
@@ -52,6 +69,78 @@ class Exporter:
         self._spaces: dict[str, str] = {}
         self.workers = max(1, int(config.section("http").get("concurrency", 1) or 1))
         self._lock = threading.Lock()
+        # counters only -- never held across network I/O
+        self._counts = threading.Lock()
+        self.pages = PageMap()
+        self._exists: dict[str, bool | None] = {}
+        self._tiny: dict[str, str | None] = {}
+
+    class _Links:
+        """Adapter handed to the Converter; keeps link policy in one place."""
+
+        def __init__(self, outer: "Exporter", origin: Path, page: Path | None = None) -> None:
+            self.outer, self.origin, self.page = outer, origin, page
+
+        def page_id_for(self, url: str) -> str | None:
+            return self.outer._page_id_for(url)
+
+        def href(self, page_id: str) -> str | None:
+            found = self.outer.pages.by_page_id(page_id, self.origin)
+            if found:
+                with self.outer._counts:
+                    self.outer.stats.localised_links += 1
+            return found
+
+        def title(self, space: str, title: str) -> str | None:
+            found = self.outer.pages.by_page_title(space, title, self.origin)
+            if found:
+                with self.outer._counts:
+                    self.outer.stats.localised_links += 1
+            return found
+
+        def state(self, page_id: str) -> str:
+            exists = self.outer._page_exists(page_id)
+            if exists is None:  # the API never answered; do not invent a verdict
+                return UNVERIFIED
+            return UNRESOLVED if exists else MISSING
+
+        def note(self, kind: str, label: str, target: str) -> None:
+            # Bundle-relative: an absolute path would put the output directory
+            # into the manifest and break byte-stability across locations.
+            source = self.page or self.origin
+            try:
+                origin = str(source.relative_to(self.outer.bundle))
+            except ValueError:
+                origin = ""
+            with self.outer._counts:
+                self.outer.stats.unresolved_links += 1
+                self.outer.pages.record(kind, label, target, origin)
+
+    def _page_id_for(self, url: str) -> str | None:
+        """Page id from a direct URL, or from a short link by following it."""
+        direct = parse_page_url(url)
+        if direct:
+            return direct[1]
+        if not is_tiny_url(url):
+            return None
+        with self._lock:
+            known = self._tiny.get(url, "__miss__")
+        if known == "__miss__":
+            final = self.client.final_url(url)
+            parsed = parse_page_url(final or "")
+            known = parsed[1] if parsed else None
+            if final is None:
+                with self._counts:
+                    self.pages.record("short-link-unresolved", "", url, "")
+            with self._lock:
+                self._tiny[url] = known
+        return known
+
+    def _page_exists(self, page_id: str) -> bool | None:
+        """'not in this export' vs 'gone from Confluence' vs 'no answer'."""
+        if page_id not in self._exists:
+            self._exists[page_id] = self.client.probe(f"/api/v2/pages/{page_id}")
+        return self._exists[page_id]
 
     def _space_key(self, space_id: str | None) -> str:
         if not space_id:
@@ -75,8 +164,10 @@ class Exporter:
         parts = [safe_filename(a, self.suffix) for a in node.ancestors]
         return self.bundle.joinpath(*parts) / f"{safe_filename(title, self.suffix)}.md"
 
-    def export_page(self, node: Node, generated_at: str) -> Path | None:
-        page = self.client.get(f"/api/v2/pages/{node.id}", **{"body-format": "storage"})
+    def export_page(self, node: Node, generated_at: str,
+                    page: dict[str, Any] | None = None) -> Path | None:
+        if page is None:
+            page = self.client.get(f"/api/v2/pages/{node.id}", **{"body-format": "storage"})
         if not page.get("id"):
             with self._lock:
                 self.stats.failed.append(node.id)
@@ -85,14 +176,15 @@ class Exporter:
         path = self._page_path(node, title)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        with self._lock:
-            mapping = self.assets.fetch_for_page(node.id)
+        mapping = self.assets.fetch_for_page(node.id)
         options = dict(self.markdown, base_url=self.client.base_url)
         converter = Converter(options, self.assets.resolver_for(mapping, path.parent),
-                              user_resolver=self.client.display_name)
+                              user_resolver=self.client.display_name,
+                              links=self._Links(self, path.parent, path))
         body = converter.convert(page.get("body", {}).get("storage", {}).get("value", ""))
+        body = self._append_attachments(body, mapping, path.parent)
 
-        with self._lock:
+        with self._counts:
             self.stats.html_tables += converter.flags.html_tables
             self.stats.unknown_macros += converter.flags.unknown_macros
             self.stats.generated_macros += converter.flags.generated_macros
@@ -119,9 +211,27 @@ class Exporter:
             views_window_days=self.windows[0] if (self.windows and self.include_usage) else None,
         )
         path.write_text(head + "\n" + body, encoding="utf-8")
-        with self._lock:
+        with self._counts:
             self.stats.pages += 1
         return path
+
+    def _append_attachments(self, body: str, mapping: dict[str, str], origin: Path) -> str:
+        """Files attached to a page but never embedded in it would otherwise be
+        invisible to anything reading the Markdown."""
+        if not mapping:
+            return body
+        stranded = sorted(
+            (title, rel) for title, rel in mapping.items()
+            if Path(rel).name not in body)
+        if not stranded:
+            return body
+        with self._counts:
+            self.stats.stranded_assets += len(stranded)
+        lines = ["", "## Attachments", ""]
+        for title, rel in stranded:
+            target = os.path.relpath(self.bundle / rel, origin).replace(os.sep, "/")
+            lines.append(f"- [{title}]({target})")
+        return body.rstrip() + "\n" + "\n".join(lines) + "\n"
 
     def write_indexes(self, written: list[Path]) -> int:
         """One index.md per directory: a listing, per the OKF layout. Entries are
@@ -155,6 +265,31 @@ class Exporter:
                 current = current.parent
         return out
 
+    def _write_manifest(self, written: list[Path]) -> None:
+        """Completeness is provable rather than assumed: every source page, every
+        asset, and every reference that could not be localised."""
+        # No run timestamp: it would rewrite the manifest on every run and
+        # cost the bundle its byte-stability. The index CSV records when a
+        # crawl happened.
+        manifest = {
+            "pages": sorted(
+                ({"page_id": pid, "path": str(path.relative_to(self.bundle))}
+                 for pid, path in self.pages.by_id.items()),
+                key=lambda row: row["path"]),
+            "assets": sorted(
+                ({"key": key, **meta} for key, meta in self.assets.index.items()),
+                key=lambda row: row["path"]),
+            "unresolved_links": sorted(
+                self.pages.unresolved,
+                key=lambda row: (row["from"], row["kind"], row["target"])),
+            "ambiguous_titles": sorted(f"{s}:{t}" for s, t in self.pages.ambiguous_titles),
+            "failed": self.stats.failed,
+        }
+        (self.bundle / "manifest.json").write_text(
+            # sort_keys so a freshly built entry and one reloaded from disk
+            # serialise identically
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
     def run(self, roots: list[Root]) -> ExportStats:
         generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.bundle.mkdir(parents=True, exist_ok=True)
@@ -167,14 +302,35 @@ class Exporter:
             include_ids=normalize_ids(filters.get("include")),
         )
         nodes = [node for root in roots for node in walker.walk(root)]
+
+        # Pass 1: fetch every page, then build the id/title -> path map. Links
+        # can only be localised once every destination is known.
+        def fetch(node: Node) -> tuple[Node, dict[str, Any]]:
+            return node, self.client.get(f"/api/v2/pages/{node.id}",
+                                         **{"body-format": "storage"})
+
         if self.workers == 1:
-            paths = [self.export_page(n, generated_at) for n in nodes]
+            fetched = [fetch(n) for n in nodes]
         else:
             with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                paths = list(pool.map(lambda n: self.export_page(n, generated_at), nodes))
+                fetched = list(pool.map(fetch, nodes))
+        for node, page in fetched:
+            if page.get("id"):
+                title = page.get("title", node.title)
+                self.pages.add(node.id, self._space_key(page.get("spaceId")),
+                               title, self._page_path(node, title))
+
+        # Pass 2: convert and write.
+        if self.workers == 1:
+            paths = [self.export_page(n, generated_at, p) for n, p in fetched]
+        else:
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                paths = list(pool.map(
+                    lambda item: self.export_page(item[0], generated_at, item[1]), fetched))
         written = [p for p in paths if p]
         self.assets.save()
         self.write_indexes(written)
+        self._write_manifest(written)
         self.stats.assets_downloaded = self.assets.downloaded
         self.stats.assets_reused = self.assets.reused
         self.stats.failed += self.assets.failed

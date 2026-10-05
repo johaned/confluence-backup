@@ -231,3 +231,31 @@ def test_excluding_by_url_works(tmp_path: Path) -> None:
     stats = Exporter(simple_site(), conf).run([Root(FOLDER, "F1")])
     assert stats.pages == 1
     assert not (tmp_path / "bundle" / "Docs" / "Beta.md").exists()
+
+
+def test_git_repo_detection(tmp_path: Path) -> None:
+    """Version control is recommended, never required -- so the check only
+    drives a one-line hint, and must not misreport either way."""
+    from cbackup.export import in_git_repo
+
+    plain = tmp_path / "plain" / "bundle"
+    plain.mkdir(parents=True)
+    assert in_git_repo(plain) is False
+
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    nested = tmp_path / "repo" / "deep" / "bundle"
+    nested.mkdir(parents=True)
+    assert in_git_repo(nested) is True
+
+
+def test_manifest_has_no_absolute_paths(tmp_path: Path) -> None:
+    """Anything path-dependent in the output breaks byte-stability between
+    locations -- the root index heading did this once already."""
+    import json
+
+    conf = config(tmp_path, output={"bundle_dir": str(tmp_path / "deep" / "bundle")})
+    Exporter(simple_site(), conf).run([Root(FOLDER, "F1")])
+    raw = (tmp_path / "deep" / "bundle" / "manifest.json").read_text()
+    assert str(tmp_path) not in raw
+    manifest = json.loads(raw)
+    assert {"pages", "assets", "unresolved_links"} <= set(manifest)

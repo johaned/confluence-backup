@@ -1,10 +1,21 @@
 # cbackup
 
-Mirrors Confluence Cloud pages to local Markdown as an
+Extracts Confluence Cloud pages into portable Markdown as an
 [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
-bundle: Obsidian-friendly, attachment-complete, and **diffable** — re-running
-on unchanged pages produces byte-identical files, so a `git diff` shows what
-changed in Confluence, not what the exporter felt like emitting.
+bundle, for **migrating content to another platform**.
+
+The priorities, in order:
+
+1. **Fidelity** — content arrives intact. Tables keep their structure, macros
+   are converted or flagged, nothing disappears silently.
+2. **Completeness** — attachments come along, links are rewritten, and the
+   quality gate fails the run if any page lost content.
+3. **Triage** — the index tells you which pages are worth migrating and which
+   are risky to convert, before you commit to anything.
+
+Re-runs are byte-stable, which makes repeated extraction safe and cheap. That
+also happens to make the output diffable, but see the note at the end: that is
+a side effect, not the purpose.
 
 ## Setup
 
@@ -106,6 +117,22 @@ uv run pytest -m live    # opt-in, hits the real API to catch drift
 
 Tests use synthetic fixtures reproducing the structures found in real spaces
 rather than copies of real pages, so no internal documentation is committed.
+
+## Optional: version-controlling the bundle
+
+Not needed for a migration, and safe to ignore. It matters only if you keep
+extracting over time and want to see what changed between runs -- the export
+is byte-stable, so a repository turns each run into a reviewable diff.
+
+If you do, use a **private** repository separate from this tool, since a
+typical space is a few hundred pages of internal documentation:
+
+```bash
+cbackup export --root SE --bundle-dir ../confluence-mirror
+```
+
+`cbackup` prints a one-line reminder when the bundle is not in a repository
+and behaves identically either way.
 
 ## Notes
 

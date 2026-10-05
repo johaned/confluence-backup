@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Any
 
 from . import config as cfg
 from .client import ConfluenceClient
-from .export import Exporter
+from .export import Exporter, in_git_repo
 from .enrich import Enricher
 from .gate import Gate
 from .index import Indexer
@@ -149,6 +150,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{stats.pages} pages -> {bundle}")
             print(f"  assets: {stats.assets_downloaded} downloaded, {stats.assets_reused} reused")
             print(f"  html tables: {stats.html_tables}")
+            print(f"  links localised: {stats.localised_links}, "
+                  f"left as marked URLs: {stats.unresolved_links}")
+            if stats.stranded_assets:
+                print(f"  attachments listed that were not embedded: "
+                      f"{stats.stranded_assets}")
             if stats.generated_macros:
                 print(f"  generated macros placeholdered: {sorted(set(stats.generated_macros))}")
             if stats.unknown_macros:
@@ -157,6 +163,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  missing assets: {len(stats.missing_assets)}")
             if stats.failed:
                 print(f"  failed: {stats.failed[:5]}")
+            if not in_git_repo(Path(bundle)):
+                print("  note: this bundle is not in a git repository. Exports are "
+                      "byte-stable,\n        so committing it makes each run a reviewable "
+                      "diff of what changed\n        in Confluence. Optional -- the export "
+                      "works the same without it.")
         elif args.command == "gate":
             path, reports = Gate(client, conf).run()
             failed = [r for r in reports if not r.ok]

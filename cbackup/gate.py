@@ -32,6 +32,10 @@ HTML_TABLE = re.compile(r"<table[\s>]")
 HTML_CODE = re.compile(r"<pre><code")
 HTML_LINK = re.compile(r"<a [^>]*href=")
 HTML_HEADING = re.compile(r"<h[1-6][ >]")
+# A title-based Confluence link carries no page id, so when it cannot be
+# localised there is no URL to keep -- it renders as a marked label. That is
+# an accounted-for reference, not a lost one.
+MARKED_NO_URL = re.compile(r"(?<!\))\s\*\*\((?:NOT EXPORTED|BROKEN|LINK UNVERIFIED)\)\*\*")
 LEAK = re.compile(r"ac:(structured-macro|plain-text-body|rich-text-body)|ri:attachment")
 
 
@@ -60,7 +64,7 @@ def count_markdown(text: str) -> dict[str, int]:
         "headings": len(HEADING.findall(body)) + len(HTML_HEADING.findall(body)),
         "images": len(IMAGE.findall(body)),
         "links": (len(LINK.findall(without_images)) + len(WIKILINK.findall(body))
-                  + len(HTML_LINK.findall(body))),
+                  + len(HTML_LINK.findall(body)) + len(MARKED_NO_URL.findall(body))),
     }
 
 

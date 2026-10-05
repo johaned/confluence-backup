@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import mimetypes
 import os
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ class AssetStore:
     downloaded: int = 0
     reused: int = 0
     failed: list[str] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @property
     def root(self) -> Path:
@@ -71,7 +73,7 @@ class AssetStore:
             if blob is None:
                 self.failed.append(f"{page_id}:{title}")
                 continue
-            digest = hashlib.sha256(blob).hexdigest()[:HASH_LEN]
+            digest = hashlib.sha256(blob).hexdigest()[:HASH_LEN]  # outside any lock
             name = f"{digest}{_extension(title, attachment.get('mediaType'))}"
             relative = f"{self.subdir}/{name}"
             target = self.bundle_dir / relative
@@ -81,13 +83,14 @@ class AssetStore:
                 self.downloaded += 1
             else:
                 self.reused += 1
-            self.index[key] = {
-                "path": relative,
-                "title": title,
-                "media_type": attachment.get("mediaType", ""),
-                "size": attachment.get("fileSize", len(blob)),
-                "sha256_16": digest,
-            }
+            with self._lock:
+                self.index[key] = {
+                    "path": relative,
+                    "title": title,
+                    "media_type": attachment.get("mediaType", ""),
+                    "size": attachment.get("fileSize", len(blob)),
+                    "sha256_16": digest,
+                }
             mapping[title] = relative
         return mapping
 
